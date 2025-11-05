@@ -1,0 +1,237 @@
+//@version=5
+//@author="echoffs"
+//@description="Backtest a reversal strategy that combines higher-timeframe swing failure patterns with lower-timeframe Money Noodle flips."
+strategy("HTF SFP Money Noodle Strategy", overlay=true, initial_capital=30000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.05, calc_on_every_tick=true)
+
+// =========================
+// === VERSIONING/NOTES ===
+// =========================
+string VERSION = "0.1.0"
+
+// =========================
+// === USER PARAMETERS ===
+// =========================
+string setupGroup = "Setup"
+string moneyNoodleGroup = "Money Noodle"
+string riskGroup = "Risk & Targets"
+string vizGroup = "Visuals"
+
+// Higher-timeframe (HTF) configuration for SFP detection
+string htfTimeframe = input.timeframe("240", "HTF for SFP", group=setupGroup, tooltip="Higher timeframe that is monitored for swing failure patterns. Examples: 60 (H1), 240 (H4), 720 (H12), D (Daily).")
+int htfSwingLen = input.int(3, "HTF Swing Lookback", minval=1, maxval=20, group=setupGroup, tooltip="Number of bars to the left/right for HTF swing detection. Larger values smooth the swing structure.")
+int maxLtfBarsAfterSfp = input.int(20, "Max LTF Bars After SFP", minval=1, maxval=500, group=setupGroup, tooltip="Number of lower timeframe bars allowed between the HTF SFP and the Money Noodle flip. Prevents very late entries.")
+
+// Lower-timeframe configuration for entries
+string ltfTimeframe = input.timeframe("15", "Entry Timeframe", group=setupGroup, tooltip="Lower timeframe that evaluates the Money Noodle flip. Use chart timeframe or specify another TF for multi-timeframe testing.")
+bool enableLongs = input.bool(true, "Enable Longs", group=setupGroup)
+bool enableShorts = input.bool(true, "Enable Shorts", group=setupGroup)
+
+// Money Noodle parameters
+int emaLen = input.int(36, "EMA Length", minval=1, group=moneyNoodleGroup)
+int atrLen = input.int(20, "ATR Length", minval=1, group=moneyNoodleGroup)
+float atrMult = input.float(0.5, "ATR Multiplier", minval=0.05, step=0.05, group=moneyNoodleGroup)
+int bandSmoothLen = input.int(2, "Band Smoothing Length", minval=1, group=moneyNoodleGroup, tooltip="EMA smoothing length applied to the ATR bands (defaults to 2 like the Money Noodle indicator).")
+
+// Risk management and exits
+float riskPercent = input.float(1.0, "Risk % of Equity", minval=0.1, maxval=10, step=0.1, group=riskGroup, tooltip="Percentage of current equity risked per trade based on distance to the SFP wick stop.")
+float takeProfitRR = input.float(2.0, "Take Profit (R Multiple)", minval=0.25, maxval=10, step=0.25, group=riskGroup, tooltip="Take-profit distance expressed as a multiple of the initial risk.")
+int maxConcurrentPositions = input.int(2, "Max Concurrent Positions", minval=1, maxval=10, group=riskGroup, tooltip="Limit on the number of simultaneous open positions.")
+
+// Visual toggles
+bool showMoneyNoodle = input.bool(true, "Show Money Noodle Bands", group=vizGroup)
+bool showBandFill = input.bool(true, "Show Band Fill", group=vizGroup)
+bool darkenBackground = input.bool(false, "Darken Background", group=vizGroup)
+bool showSfpMarkers = input.bool(true, "Show SFP Markers", group=vizGroup)
+bool showInfoTable = input.bool(true, "Show Info Table", group=vizGroup)
+
+// =========================
+// === HELPER FUNCTIONS ===
+// =========================
+calc_htf_sfp(int swingLen) =>
+    var float lastSwingLow = na
+    var float lastSwingHigh = na
+    var float lastBullStop = na
+    var float lastBearStop = na
+    bool bullSignal = false
+    bool bearSignal = false
+
+    float newSwingLow = ta.pivotlow(low, swingLen, swingLen)
+    if not na(newSwingLow)
+        lastSwingLow := newSwingLow
+
+    float newSwingHigh = ta.pivothigh(high, swingLen, swingLen)
+    if not na(newSwingHigh)
+        lastSwingHigh := newSwingHigh
+
+    bullSignal := not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+    if bullSignal
+        lastBullStop := low
+
+    bearSignal := not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+    if bearSignal
+        lastBearStop := high
+
+    [bullSignal, bearSignal, lastSwingLow, lastSwingHigh, lastBullStop, lastBearStop]
+
+calc_money_noodle(int emaLength, int atrLength, float atrMultiplier, int smoothLength) =>
+    float basis = ta.ema(close, emaLength)
+    float range = ta.atr(atrLength)
+    float rawUpper = basis + range * atrMultiplier
+    float rawLower = basis - range * atrMultiplier
+    float smoothUpper = ta.ema(rawUpper, smoothLength)
+    float smoothLower = ta.ema(rawLower, smoothLength)
+    bool bullFlip = close > smoothUpper and close[1] <= smoothUpper[1]
+    bool bearFlip = close < smoothLower and close[1] >= smoothLower[1]
+    [basis, smoothUpper, smoothLower, bullFlip, bearFlip]
+
+// =========================
+// === MULTI-TIMEFRAME DATA ===
+// =========================
+[bool htfBullSfp, bool htfBearSfp, float htfSwingLow, float htfSwingHigh, float htfBullStopRaw, float htfBearStopRaw] =
+    request.security(syminfo.tickerid, htfTimeframe, calc_htf_sfp(htfSwingLen), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+
+[float ltfBasis, float ltfUpper, float ltfLower, bool ltfBullFlipRaw, bool ltfBearFlipRaw] =
+    request.security(syminfo.tickerid, ltfTimeframe, calc_money_noodle(emaLen, atrLen, atrMult, bandSmoothLen), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+
+float ltfClose = request.security(syminfo.tickerid, ltfTimeframe, close, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+
+// Ensure we only react once per HTF/LTF event when values are resampled
+bool newHtfBullSfp = htfBullSfp and not htfBullSfp[1]
+bool newHtfBearSfp = htfBearSfp and not htfBearSfp[1]
+bool newLtfBullFlip = ltfBullFlipRaw and not ltfBullFlipRaw[1]
+bool newLtfBearFlip = ltfBearFlipRaw and not ltfBearFlipRaw[1]
+
+// Track the most recent SFP context
+var float activeBullStop = na
+var float activeBearStop = na
+var int bullSfpBarIndex = na
+var int bearSfpBarIndex = na
+var bool bullSetupAvailable = false
+var bool bearSetupAvailable = false
+
+if newHtfBullSfp
+    activeBullStop := htfBullStopRaw
+    bullSfpBarIndex := bar_index
+    bullSetupAvailable := not na(activeBullStop)
+
+if newHtfBearSfp
+    activeBearStop := htfBearStopRaw
+    bearSfpBarIndex := bar_index
+    bearSetupAvailable := not na(activeBearStop)
+
+// Expire unused setups if they are too old
+if bullSetupAvailable and not na(bullSfpBarIndex) and bar_index - bullSfpBarIndex > maxLtfBarsAfterSfp
+    bullSetupAvailable := false
+    activeBullStop := na
+
+if bearSetupAvailable and not na(bearSfpBarIndex) and bar_index - bearSfpBarIndex > maxLtfBarsAfterSfp
+    bearSetupAvailable := false
+    activeBearStop := na
+
+// =========================
+// === ENTRY CONDITIONS ===
+// =========================
+float equity = strategy.equity
+float riskCash = equity * (riskPercent / 100)
+var int tradeCounter = 0
+
+// Helper to enforce concurrent position cap
+bool canEnterNewPosition = strategy.opentrades < maxConcurrentPositions
+
+if enableLongs and bullSetupAvailable and newLtfBullFlip and canEnterNewPosition and not na(activeBullStop)
+    float entryPrice = ltfClose
+    float stopPrice = activeBullStop
+    if not na(entryPrice) and not na(stopPrice)
+        float riskDistance = entryPrice - stopPrice
+        bool validRisk = riskDistance > syminfo.mintick and riskDistance > 0
+        if validRisk and riskCash > 0
+            float qty = riskCash / riskDistance
+            if qty > 0
+                tradeCounter += 1
+                string entryId = "Long_" + str.tostring(tradeCounter)
+                string exitId = "LongExit_" + str.tostring(tradeCounter)
+                float takeProfitPrice = entryPrice + riskDistance * takeProfitRR
+                strategy.entry(entryId, strategy.long, qty=qty, when=true)
+                strategy.exit(exitId, from_entry=entryId, stop=stopPrice, limit=takeProfitPrice)
+                bullSetupAvailable := false
+                activeBullStop := na
+
+if enableShorts and bearSetupAvailable and newLtfBearFlip and canEnterNewPosition and not na(activeBearStop)
+    float entryPrice = ltfClose
+    float stopPrice = activeBearStop
+    if not na(entryPrice) and not na(stopPrice)
+        float riskDistance = stopPrice - entryPrice
+        bool validRisk = riskDistance > syminfo.mintick and riskDistance > 0
+        if validRisk and riskCash > 0
+            float qty = riskCash / riskDistance
+            if qty > 0
+                tradeCounter += 1
+                string entryId = "Short_" + str.tostring(tradeCounter)
+                string exitId = "ShortExit_" + str.tostring(tradeCounter)
+                float takeProfitPrice = entryPrice - riskDistance * takeProfitRR
+                strategy.entry(entryId, strategy.short, qty=qty, when=true)
+                strategy.exit(exitId, from_entry=entryId, stop=stopPrice, limit=takeProfitPrice)
+                bearSetupAvailable := false
+                activeBearStop := na
+
+// =========================
+// === VISUALIZATION ===
+// =========================
+color noodleColor = color.rgb(170, 185, 209)
+plot(showMoneyNoodle ? ltfBasis : na, title="Money Noodle EMA", color=noodleColor, linewidth=2)
+plot noodleUpperPlot = plot(showMoneyNoodle ? ltfUpper : na, title="Money Noodle Upper", color=noodleColor, linewidth=2)
+plot noodleLowerPlot = plot(showMoneyNoodle ? ltfLower : na, title="Money Noodle Lower", color=noodleColor, linewidth=2)
+if showMoneyNoodle and showBandFill
+    fill(noodleUpperPlot, noodleLowerPlot, color=color.new(noodleColor, 93), title="Money Noodle Fill")
+
+if darkenBackground
+    bgcolor(color.new(color.black, 90))
+
+plotshape(showSfpMarkers and newHtfBullSfp ? htfSwingLow : na, title="HTF Bullish SFP", style=shape.triangleup, location=location.absolute, color=color.new(color.green, 0), size=size.tiny, text="HTF SFP")
+plotshape(showSfpMarkers and newHtfBearSfp ? htfSwingHigh : na, title="HTF Bearish SFP", style=shape.triangledown, location=location.absolute, color=color.new(color.red, 0), size=size.tiny, text="HTF SFP")
+plotshape(showSfpMarkers and newLtfBullFlip ? ltfClose : na, title="LTF Bull Flip", style=shape.labelup, location=location.absolute, color=color.new(color.green, 70), size=size.tiny, text="Flip")
+plotshape(showSfpMarkers and newLtfBearFlip ? ltfClose : na, title="LTF Bear Flip", style=shape.labeldown, location=location.absolute, color=color.new(color.red, 70), size=size.tiny, text="Flip")
+
+// Plot active stops for reference
+plot(showSfpMarkers ? activeBullStop : na, title="Active Bull Stop", style=plot.style_cross, color=color.new(color.green, 50))
+plot(showSfpMarkers ? activeBearStop : na, title="Active Bear Stop", style=plot.style_cross, color=color.new(color.red, 50))
+
+// =========================
+// === PERFORMANCE TABLE ===
+// =========================
+var table infoTable = table.new(position.top_right, 2, 8, border_width=1, border_color=color.new(color.gray, 70), frame_color=color.new(color.black, 0))
+
+if showInfoTable and barstate.islast
+    float netProfit = strategy.netprofit
+    float netProfitPct = strategy.initial_capital != 0 ? (netProfit / strategy.initial_capital) * 100 : na
+    float winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : na
+    float profitFactor = strategy.grossloss != 0 ? math.abs(strategy.grossprofit / strategy.grossloss) : na
+    float avgTrade = strategy.closedtrades > 0 ? netProfit / strategy.closedtrades : na
+    float maxDD = strategy.max_drawdown
+
+    table.cell(infoTable, 0, 0, "HTF/LTF", text_color=color.white, bgcolor=color.new(color.purple, 70))
+    table.cell(infoTable, 1, 0, htfTimeframe + " / " + ltfTimeframe, text_color=color.white, bgcolor=color.new(color.purple, 70))
+
+    table.cell(infoTable, 0, 1, "Version", text_color=color.white)
+    table.cell(infoTable, 1, 1, VERSION, text_color=color.white)
+
+    table.cell(infoTable, 0, 2, "Net Profit", text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring(netProfit, "#,###.##") + " ($" + str.tostring(netProfitPct, "#.##") + "%)", text_color=color.white)
+
+    table.cell(infoTable, 0, 3, "Win Rate", text_color=color.white)
+    table.cell(infoTable, 1, 3, str.tostring(winRate, "#.##") + "%", text_color=color.white)
+
+    table.cell(infoTable, 0, 4, "Profit Factor", text_color=color.white)
+    table.cell(infoTable, 1, 4, str.tostring(profitFactor, "#.##"), text_color=color.white)
+
+    table.cell(infoTable, 0, 5, "Avg Trade", text_color=color.white)
+    table.cell(infoTable, 1, 5, str.tostring(avgTrade, "#,###.##"), text_color=color.white)
+
+    table.cell(infoTable, 0, 6, "Max DD", text_color=color.white)
+    table.cell(infoTable, 1, 6, str.tostring(maxDD, "#,###.##"), text_color=color.white)
+
+    table.cell(infoTable, 0, 7, "Open Trades", text_color=color.white)
+    table.cell(infoTable, 1, 7, str.tostring(strategy.opentrades), text_color=color.white)
+
+if not showInfoTable and barstate.islast
+    table.clear(infoTable)
