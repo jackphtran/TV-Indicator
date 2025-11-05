@@ -75,9 +75,9 @@ calc_htf_sfp(int swingLen) =>
 
 calc_money_noodle(int emaLength, int atrLength, float atrMultiplier, int smoothLength) =>
     float basis = ta.ema(close, emaLength)
-    float range = ta.atr(atrLength)
-    float rawUpper = basis + range * atrMultiplier
-    float rawLower = basis - range * atrMultiplier
+    float atrValue = ta.atr(atrLength)
+    float rawUpper = basis + atrValue * atrMultiplier
+    float rawLower = basis - atrValue * atrMultiplier
     float smoothUpper = ta.ema(rawUpper, smoothLength)
     float smoothLower = ta.ema(rawLower, smoothLength)
     bool bullFlip = close > smoothUpper and close[1] <= smoothUpper[1]
