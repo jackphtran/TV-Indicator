@@ -87,10 +87,10 @@ calc_money_noodle(int emaLength, int atrLength, float atrMultiplier, int smoothL
 // =========================
 // === MULTI-TIMEFRAME DATA ===
 // =========================
-[bool htfBullSfp, bool htfBearSfp, float htfSwingLow, float htfSwingHigh, float htfBullStopRaw, float htfBearStopRaw] =
+[htfBullSfp, htfBearSfp, htfSwingLow, htfSwingHigh, htfBullStopRaw, htfBearStopRaw] =
     request.security(syminfo.tickerid, htfTimeframe, calc_htf_sfp(htfSwingLen), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
 
-[float ltfBasis, float ltfUpper, float ltfLower, bool ltfBullFlipRaw, bool ltfBearFlipRaw] =
+[ltfBasis, ltfUpper, ltfLower, ltfBullFlipRaw, ltfBearFlipRaw] =
     request.security(syminfo.tickerid, ltfTimeframe, calc_money_noodle(emaLen, atrLen, atrMult, bandSmoothLen), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
 
 float ltfClose = request.security(syminfo.tickerid, ltfTimeframe, close, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
