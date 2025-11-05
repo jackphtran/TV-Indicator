@@ -87,11 +87,21 @@ calc_money_noodle(int emaLength, int atrLength, float atrMultiplier, int smoothL
 // =========================
 // === MULTI-TIMEFRAME DATA ===
 // =========================
-[htfBullSfp, htfBearSfp, htfSwingLow, htfSwingHigh, htfBullStopRaw, htfBearStopRaw] =
-    request.security(syminfo.tickerid, htfTimeframe, calc_htf_sfp(htfSwingLen), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+[htfBullSfp, htfBearSfp, htfSwingLow, htfSwingHigh, htfBullStopRaw, htfBearStopRaw] = request.security(
+    syminfo.tickerid,
+    htfTimeframe,
+    calc_htf_sfp(htfSwingLen),
+    lookahead=barmerge.lookahead_off,
+    gaps=barmerge.gaps_off
+)
 
-[ltfBasis, ltfUpper, ltfLower, ltfBullFlipRaw, ltfBearFlipRaw] =
-    request.security(syminfo.tickerid, ltfTimeframe, calc_money_noodle(emaLen, atrLen, atrMult, bandSmoothLen), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+[ltfBasis, ltfUpper, ltfLower, ltfBullFlipRaw, ltfBearFlipRaw] = request.security(
+    syminfo.tickerid,
+    ltfTimeframe,
+    calc_money_noodle(emaLen, atrLen, atrMult, bandSmoothLen),
+    lookahead=barmerge.lookahead_off,
+    gaps=barmerge.gaps_off
+)
 
 float ltfClose = request.security(syminfo.tickerid, ltfTimeframe, close, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
 
